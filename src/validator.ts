@@ -1,22 +1,61 @@
-/* 
-SPDX-FileCopyrightText: 2023 Kevin de Jong <monkaii@hotmail.com>
+/*
+ * SPDX-FileCopyrightText: 2023 Kevin de Jong <monkaii@hotmail.com>
+ * SPDX-License-Identifier: MIT
+ */
 
-SPDX-License-Identifier: GPL-3.0-or-later
-*/
+import { Commit, ConventionalCommit } from "@dev-build-deploy/commit-it";
+import { DiagnosticsMessage, FixItHint } from "@dev-build-deploy/diagnose-it";
 
-import * as datasources from "./datasources";
-import * as conventionalCommit from "./conventional_commit";
-import { CommitExpressiveMessage } from "./conventional_commit";
+import { Configuration } from "./configuration";
 
 /**
- * Validation result interface
- * @interface IValidationResult
- * @member commit The commit that was validated
- * @member errors List of error messages
+ * Validates a single commit message against the Conventional Commit specification.
+ * @param commit Commit message to validate against the Conventional Commit specification
+ * @returns Validation result
  */
-interface IValidationResult {
-  commit: datasources.ICommit;
-  errors: string[];
+function validateCommit(commit: Commit): ConventionalCommit {
+  return ConventionalCommit.fromCommit(commit, Configuration.getInstance());
+}
+
+/**
+ * Validates the pull request against CommitMe requirements.
+ * @param pullrequest The pull request to validate
+ * @param commits The commits associated with the pull request
+ * @returns Validation result
+ */
+export function validatePullRequest(pullrequest: Commit, commits: ConventionalCommit[]): ConventionalCommit {
+  const result = validateCommit(pullrequest);
+
+  if (!result.isValid) return result;
+
+  const orderValue = (commit: ConventionalCommit): number => {
+    if (commit.breaking) return 3;
+    if (commit.type?.toLowerCase() === "feat") return 2;
+    if (commit.type?.toLowerCase() === "fix") return 1;
+    return 0;
+  };
+
+  const pullRequestValue = orderValue(result);
+  const validConventionalCommits = commits.filter(commit => commit.isValid);
+  // No valid commits found, return the pull request validation result
+  if (validConventionalCommits.length === 0) return result;
+
+  // Sort the commits by order of precedence (SemVer) and validate against the Pull Request (SemVer)
+  const commitsValue = orderValue(validConventionalCommits.sort((a, b) => (orderValue(a) < orderValue(b) ? 1 : -1))[0]);
+
+  if (pullRequestValue < commitsValue) {
+    result.errors.push(
+      DiagnosticsMessage.createError(result.hash, {
+        text: `A Pull Request MUST correlate with a Semantic Versioning identifier (\`MAJOR\`, \`MINOR\`, or \`PATCH\`) with the same or higher precedence than its associated commits`,
+        linenumber: 1,
+        column: 1,
+      })
+        .setContext(1, result.subject)
+        .addFixitHint(FixItHint.create({ index: 1, length: result.type?.length ?? 1 }))
+    );
+  }
+
+  return result;
 }
 
 /**
@@ -25,34 +64,6 @@ interface IValidationResult {
  * @returns A list of validation results
  * @see https://www.conventionalcommits.org/en/v1.0.0/
  */
-const validate = (commits: datasources.ICommit[]): IValidationResult[] => {
-  const validationResults: IValidationResult[] = [];
-  for (const commit of commits) {
-    // Skip fixup commits
-    if (commit.message.startsWith("fixup!")) continue;
-
-    const result: IValidationResult = {
-      commit: commit,
-      errors: [],
-    };
-
-    try {
-      conventionalCommit.parse(commit);
-    } catch (error) {
-      if (Array.isArray(error)) {
-        error
-          .filter(e => e instanceof conventionalCommit.RequirementError)
-          .forEach(e =>
-            (e as conventionalCommit.RequirementError).errors
-              .filter(e => e instanceof CommitExpressiveMessage)
-              .forEach(e => result.errors.push(e.message))
-          );
-      }
-    }
-
-    validationResults.push(result);
-  }
-  return validationResults;
-};
-
-export { validate };
+export function validateCommits(commits: Commit[]): ConventionalCommit[] {
+  return commits.filter(commit => !commit.isFixupCommit && !commit.isMergeCommit).map(commit => validateCommit(commit));
+}

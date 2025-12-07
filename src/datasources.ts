@@ -1,94 +1,123 @@
-/* 
-SPDX-FileCopyrightText: 2023 Kevin de Jong <monkaii@hotmail.com>
-
-SPDX-License-Identifier: GPL-3.0-or-later
-*/
-import simpleGit from "simple-git";
-import * as github from "@actions/github";
-
-/**
- * Commit information
- * @interface ICommit
- * @member hash The commit hash
- * @member date The commit date
- * @member message The commit message
- * @member body The commit body
- * @member author The commit author name (.name) and email (.email)
+/*
+ * SPDX-FileCopyrightText: 2023 Kevin de Jong <monkaii@hotmail.com>
+ * SPDX-License-Identifier: MIT
  */
-interface ICommit {
-  hash: string;
-  date: string;
-  message: string;
-  body: string;
-  author: { name: string; email: string };
-}
+
+import assert from "assert";
+import * as fs from "fs";
+
+import * as core from "@actions/core";
+import * as github from "@actions/github";
+import { Commit } from "@dev-build-deploy/commit-it";
+import { RequestError } from "@octokit/request-error";
+import { simpleGit } from "simple-git";
 
 /** DataSource abstraction interface
  * @interface IDataSource
  * @member getCommitMessages Returns a list of commits to be validated
  */
-interface IDataSource {
-  getCommitMessages(): Promise<ICommit[]>;
+export interface IDataSource {
+  getCommitMessages(): Promise<Commit[]>;
+  getConfigurationFile(path: string): Promise<string | undefined>;
+}
+
+/**
+ * File data source for parsing a file containing the commit message.
+ */
+export class FileSource implements IDataSource {
+  file: string;
+
+  constructor(file: string) {
+    this.file = file;
+
+    if (!fs.existsSync(this.file)) {
+      throw new Error(`File ${this.file} does not exist`);
+    }
+  }
+
+  async getCommitMessages(): Promise<Commit[]> {
+    return [Commit.fromString({ hash: "HEAD", message: fs.readFileSync(this.file, "utf8") })];
+  }
+
+  async getConfigurationFile(path: string): Promise<string | undefined> {
+    if (!fs.existsSync(path)) {
+      return undefined;
+    }
+
+    return fs.readFileSync(path, "utf8");
+  }
 }
 
 /**
  * Git data source for determining which commits need to be validated.
  */
-class GitSource implements IDataSource {
+export class GitSource implements IDataSource {
   sourceBranch: string;
 
-  constructor(sourceBranch: string = "main") {
-    this.sourceBranch = sourceBranch;
+  constructor(baseBranch = "main") {
+    this.sourceBranch = baseBranch;
   }
 
-  public async getCommitMessages(): Promise<ICommit[]> {
-    const data = await simpleGit().log({
-      from: this.sourceBranch,
-      to: "HEAD",
-    });
-    return data.all.map((commit: any) => {
-      return {
-        hash: commit.hash,
-        date: commit.date,
-        message: commit.message,
-        body: commit.body,
-        author: {
-          name: commit.author_name,
-          email: commit.author_email,
-        },
-      } as ICommit;
-    });
+  async getCommitMessages(): Promise<Commit[]> {
+    const data = await simpleGit().log({ from: this.sourceBranch, to: "@{push}" });
+    return data.all.map(commit => Commit.fromHash({ hash: commit.hash }));
+  }
+
+  async getConfigurationFile(path: string): Promise<string | undefined> {
+    if (!fs.existsSync(path)) {
+      return undefined;
+    }
+
+    return fs.readFileSync(path, "utf8");
   }
 }
 
 /**
  * GitHub data source for determining which commits need to be validated.
  */
-class GitHubSource implements IDataSource {
-  octokit: any;
+export class GitHubSource implements IDataSource {
+  async getCommitMessages(): Promise<Commit[]> {
+    const octokit = github.getOctokit(core.getInput("token"));
+    const pullRequestNumber = github.context.payload.pull_request?.number;
+    assert(pullRequestNumber);
 
-  constructor(octokit: any) {
-    this.octokit = octokit;
+    const commits = await octokit.rest.pulls.listCommits({ ...github.context.repo, pull_number: pullRequestNumber });
+
+    return commits.data.map(commit =>
+      Commit.fromString({
+        hash: commit.sha,
+        message: commit.commit.message,
+      })
+    );
   }
 
-  public async getCommitMessages(): Promise<ICommit[]> {
-    const commits = await this.octokit.rest.pulls.listCommits({
-      ...github.context.repo,
-      pull_number: github.context.payload.pull_request?.number ?? 0,
-    });
-    return commits.data.map((commit: any) => {
-      return {
-        hash: commit.sha,
-        date: commit.commit.author.date,
-        message: commit.commit.message.split("\n")[0],
-        body: "", // TODO: Validate commit body
-        author: {
-          name: commit.author.name,
-          email: commit.author.email,
-        },
-      } as ICommit;
-    });
+  /**
+   * Retrieves the specified configuration file from the repository using the REST API
+   * @param path
+   */
+  async getConfigurationFile(path: string): Promise<string | undefined> {
+    const octokit = github.getOctokit(core.getInput("token"));
+
+    try {
+      const { data: config } = await octokit.rest.repos.getContent({
+        ...github.context.repo,
+        path,
+        ref: github.context.ref,
+      });
+
+      if ("content" in config === false) {
+        throw new Error("Unsupported metadata type for Configuration path");
+      }
+
+      return Buffer.from(config.content, "base64").toString();
+    } catch (error: unknown) {
+      if (error instanceof RequestError && error.response) {
+        const reponseData = error.response.data as Record<string, unknown>;
+        if ("message" in reponseData && reponseData.message === "Not Found") {
+          return undefined;
+        }
+      }
+      throw error;
+    }
   }
 }
-
-export { ICommit, IDataSource, GitSource, GitHubSource };

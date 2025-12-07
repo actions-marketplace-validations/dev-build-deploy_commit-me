@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: 2023 Kevin de Jong <monkaii@hotmail.com>
+# SPDX-License-Identifier: MIT
+
+- id: commit-me
+  name: CommitMe - Conventional Commit message validation
+  description: Validates your commits agains the Conventional Commits specification
+  entry: pre-commit-me
+  language: node
+  stages: [commit-msg]
